@@ -117,6 +117,18 @@ else
   spec_args=(--speculative-config "{\"method\":\"mtp\",\"num_speculative_tokens\":$MTP_DEPTH,\"use_local_argmax_reduction\":true,\"model\":\"$mtp_model\"}")
 fi
 
+# lane-3090 (owner 10-28): golden-lane passthroughs. Each is omitted when unset.
+compilation_config=${COMPILATION_CONFIG:-"{\"mode\":${COMPILE_MODE:-0},\"cudagraph_mode\":\"FULL_DECODE_ONLY\"}"}
+hf_args=()
+[[ -n "${HF_OVERRIDES_JSON:-}" ]] && hf_args=(--hf-overrides "$HF_OVERRIDES_JSON")
+kv_transfer_args=()
+[[ -n "${KV_TIER_JSON:-}" ]] && kv_transfer_args=(--kv-transfer-config "$KV_TIER_JSON")
+template_args=()
+if [[ -n "${REASONING_EFFORT_TEMPLATE:-}" ]]; then
+  [[ -f "$REASONING_EFFORT_TEMPLATE" ]] || { echo "patched chat template not found at $REASONING_EFFORT_TEMPLATE" >&2; exit 2; }
+  template_args=(--chat-template "$REASONING_EFFORT_TEMPLATE")
+fi
+
 exec vllm serve "$model" \
   --served-model-name "$SERVED_MODEL_NAME" \
   --host 0.0.0.0 --port "$PORT" \
@@ -140,7 +152,10 @@ exec vllm serve "$model" \
   --mamba-cache-mode align \
   "$async_scheduling_arg" \
   ${custom_all_reduce_arg:+"$custom_all_reduce_arg"} \
-  --compilation-config "{\"mode\":${COMPILE_MODE:-0},\"cudagraph_mode\":\"FULL_DECODE_ONLY\"}" \
+  --compilation-config "$compilation_config" \
+  ${hf_args[@]+"${hf_args[@]}"} \
+  ${template_args[@]+"${template_args[@]}"} \
+  ${kv_transfer_args[@]+"${kv_transfer_args[@]}"} \
   --trust-remote-code \
   --enable-auto-tool-choice \
   --tool-call-parser qwen3_coder \

@@ -55,7 +55,18 @@ for name in \
   QWEN38_PLE_PREFAULT_RESERVE_GIB \
   VLLM_MTP_DRAFT_VOCAB_RANGES \
   KV_CACHE_DTYPE \
-  VLLM_API_KEY
+  VLLM_API_KEY \
+  NCCL_P2P_LEVEL \
+  NCCL_PROTO \
+  VLLM_CUSTOM_ALL_GATHER \
+  VLLM_CUSTOM_AR_ALLOW_PCIE \
+  VLLM_ALLOW_LONG_MAX_MODEL_LEN \
+  HF_OVERRIDES_JSON \
+  COMPILATION_CONFIG \
+  KV_TIER_JSON \
+  PYTHONHASHSEED \
+  REASONING_EFFORT \
+  REASONING_EFFORT_LOCK
 do
   if declare -p "$name" &>/dev/null; then
     docker_env+=(-e "$name=${!name}")
@@ -100,6 +111,75 @@ model_dir=$(cd -- "$model_dir" && pwd -P)
   exit 2
 }
 
+# ── lane-3090 (owner 10-28): golden-lane patches ported onto this TP4 base ──
+REPO_DIR="$(cd -- "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+# Golden graft map: every .py under golden-ext/ pastes over its dist-packages twin
+# (fp8-KV QSA island + sm_86 software e4m3 decode, PLE disk8 worker, KV disk tier
+# connector/journal, GDN, custom all-reduce over PCIe P2P, staging/tiered TP4 guards).
+ext_args=()
+EXT="$REPO_DIR/golden-ext"
+if [[ "${GOLDEN_GRAFTS:-1}" == "1" ]]; then
+  [[ -d "$EXT" ]] || { echo "missing graft tree: $EXT" >&2; exit 2; }
+  while IFS= read -r -d '' f; do
+    rel=${f#"$EXT"/}
+    ext_args+=( -v "$f:/usr/local/lib/python3.12/dist-packages/vllm/$rel:ro" )
+  done < <(find "$EXT" -type f -name '*.py' -print0)
+  echo "[docker_serve/lane-3090] graft mounts: $(( ${#ext_args[@]} / 2 ))"
+fi
+
+# Serve wrapper from this repo (hf-overrides, kv-transfer-config, compilation-config,
+# chat-template passthroughs) instead of the copy baked into the image.
+ext_args+=( -v "$REPO_DIR/scripts/serve-container.sh:/usr/local/bin/qwen38-serve:ro" )
+
+# PLE disk8: the n-gram table is read from an NVMe file (np.memmap, MADV_RANDOM),
+# not loaded into RAM. PLE_BF16_TABLE=1 = stock BF16 values.
+ple_arm_args=()
+if [[ "${PLE_ARM_DISK8:-0}" == "1" ]]; then
+  if [[ "${PLE_BF16_TABLE:-0}" == "1" ]]; then
+    DISK8_DIR=${PLE_DISK8_DIR:-/home/ai-host/models/ple-disk8-bf16}
+  else
+    DISK8_DIR=${PLE_DISK8_DIR:-/home/ai-host/models/ple-disk8}
+  fi
+  mkdir -p "$DISK8_DIR"
+  ple_arm_args+=( -v "$DISK8_DIR:/ple_disk" )
+  docker_env+=( -e "VLLM_PLE_DISK_OFFLOAD_DIR=/ple_disk" )
+  [[ "${PLE_BF16_TABLE:-0}" == "1" ]] && docker_env+=( -e "PLE_BF16_TABLE=1" )
+  echo "[docker_serve/lane-3090] PLE disk8 active (dir=$DISK8_DIR bf16=${PLE_BF16_TABLE:-0})"
+fi
+
+# Durable KV: disk tier mounted at /kv_tier (KV_TIER_JSON carries the connector doc).
+kv_tier_args=()
+if [[ -n "${KV_TIER_JSON:-}" ]]; then
+  kv_tier_dir=${KV_TIER_DIR:-/home/ai-host/models/kv-tier}
+  mkdir -p "$kv_tier_dir"
+  kv_tier_args+=( -v "$kv_tier_dir:/kv_tier" )
+  echo "[docker_serve/lane-3090] KV tier active (dir=$kv_tier_dir)"
+fi
+
+# Reasoning-effort tier (golden owner knob): serve a patched COPY of the checkpoint
+# chat template. Unset REASONING_EFFORT = stock template.
+template_args=()
+if [[ -n "${REASONING_EFFORT:-}" ]]; then
+  case "$REASONING_EFFORT" in
+    xhigh|medium|low) ;;
+    *) echo "REASONING_EFFORT must be xhigh|medium|low (got: $REASONING_EFFORT)" >&2; exit 2 ;;
+  esac
+  re_lock=${REASONING_EFFORT_LOCK:-0}
+  if [[ "$REASONING_EFFORT" != xhigh || "$re_lock" == 1 ]]; then
+    tpl_out="$REPO_DIR/.runtime/serving_chat_template.jinja"
+    mkdir -p "$(dirname "$tpl_out")"
+    re_lock_arg=()
+    [[ "$re_lock" == 1 ]] && re_lock_arg=(--lock)
+    python3 "$REPO_DIR/scripts/render_chat_template.py" \
+      --src "$model_dir/chat_template.jinja" --out "$tpl_out" --effort "$REASONING_EFFORT" "${re_lock_arg[@]}" \
+      || { echo "chat-template render REFUSED the boot" >&2; exit 2; }
+    template_args=( -v "$tpl_out:/serving_chat_template.jinja:ro" )
+    docker_env+=( -e "REASONING_EFFORT_TEMPLATE=/serving_chat_template.jinja" )
+    echo "[docker_serve/lane-3090] reasoning-effort tier = $REASONING_EFFORT (lock=$re_lock)"
+  fi
+fi
+
 exec docker run --rm \
   --name qwen38-flash-next \
   --gpus all \
@@ -112,4 +192,8 @@ exec docker run --rm \
   "${docker_env[@]}" \
   ${cache_mounts[@]+"${cache_mounts[@]}"} \
   -v "$model_dir:/model:ro" \
+  "${ext_args[@]}" \
+  ${ple_arm_args[@]+"${ple_arm_args[@]}"} \
+  ${kv_tier_args[@]+"${kv_tier_args[@]}"} \
+  ${template_args[@]+"${template_args[@]}"} \
   "$image" /model
