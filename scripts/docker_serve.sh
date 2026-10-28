@@ -66,7 +66,8 @@ for name in \
   KV_TIER_JSON \
   PYTHONHASHSEED \
   REASONING_EFFORT \
-  REASONING_EFFORT_LOCK
+  REASONING_EFFORT_LOCK \
+  EXTRA_VLLM_ARGS
 do
   if declare -p "$name" &>/dev/null; then
     docker_env+=(-e "$name=${!name}")

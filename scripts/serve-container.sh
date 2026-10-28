@@ -123,6 +123,9 @@ hf_args=()
 [[ -n "${HF_OVERRIDES_JSON:-}" ]] && hf_args=(--hf-overrides "$HF_OVERRIDES_JSON")
 kv_transfer_args=()
 [[ -n "${KV_TIER_JSON:-}" ]] && kv_transfer_args=(--kv-transfer-config "$KV_TIER_JSON")
+# Extra vllm serve flags, whitespace-split (same knob as upstream #43 EXTRA_VLLM_ARGS).
+extra_args=()
+[[ -n "${EXTRA_VLLM_ARGS:-}" ]] && read -r -a extra_args <<< "$EXTRA_VLLM_ARGS"
 template_args=()
 if [[ -n "${REASONING_EFFORT_TEMPLATE:-}" ]]; then
   [[ -f "$REASONING_EFFORT_TEMPLATE" ]] || { echo "patched chat template not found at $REASONING_EFFORT_TEMPLATE" >&2; exit 2; }
@@ -156,6 +159,7 @@ exec vllm serve "$model" \
   ${hf_args[@]+"${hf_args[@]}"} \
   ${template_args[@]+"${template_args[@]}"} \
   ${kv_transfer_args[@]+"${kv_transfer_args[@]}"} \
+  ${extra_args[@]+"${extra_args[@]}"} \
   --trust-remote-code \
   --enable-auto-tool-choice \
   --tool-call-parser qwen3_coder \
