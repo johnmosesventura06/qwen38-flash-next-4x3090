@@ -148,6 +148,15 @@ if [[ "${PLE_ARM_DISK8:-0}" == "1" ]]; then
   echo "[docker_serve/lane-3090] PLE disk8 active (dir=$DISK8_DIR bf16=${PLE_BF16_TABLE:-0})"
 fi
 
+# MTP draft with its own config (vLLM applies dict --hf-overrides to the target only, so a
+# YaRN target needs a draft folder whose config.json carries the same rope_parameters).
+if [[ -n "${MTP_MODEL_DIR:-}" ]]; then
+  mtp_dir=$(cd -- "$MTP_MODEL_DIR" && pwd -P)
+  ple_arm_args+=( -v "$mtp_dir:/mtp_model:ro" )
+  docker_env+=( -e "MTP_MODEL=/mtp_model" )
+  echo "[docker_serve/lane-3090] MTP draft from $mtp_dir"
+fi
+
 # Durable KV: disk tier mounted at /kv_tier (KV_TIER_JSON carries the connector doc).
 kv_tier_args=()
 if [[ -n "${KV_TIER_JSON:-}" ]]; then

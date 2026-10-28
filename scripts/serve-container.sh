@@ -61,7 +61,7 @@ if [[ "$DISABLE_CUSTOM_ALL_REDUCE" == 0 && "$expandable_segments" == True ]]; th
 fi
 
 model=${1:-/model}
-mtp_model=${2:-"$model/runtime/mtp-int4-g32"}
+mtp_model=${MTP_MODEL:-${2:-"$model/runtime/mtp-int4-g32"}}
 rankings=/workspace/static_hot_cache_rankings.json
 
 [[ -f "$model/model.safetensors.index.json" ]] || {

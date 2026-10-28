@@ -23,7 +23,7 @@ def initialize(method, layer):
         raise RuntimeError('staging overlap only checked for target INT4 group128')
     if (hot is base or not 16 <= hot.num_experts <= 128 or base.num_experts not in (128, 256, 512)
             or layer.top_k != 10 or cache.hot_map.numel() != 512
-            or method._static_hot_cache_max_tokens != 16):
+            or not 1 <= method._static_hot_cache_max_tokens <= 16):  # lane-3090: 1..16
         raise RuntimeError('unchecked target staging geometry')
     if hasattr(method, '_qwen38_staging'):
         if method._qwen38_staging.cache is not cache:

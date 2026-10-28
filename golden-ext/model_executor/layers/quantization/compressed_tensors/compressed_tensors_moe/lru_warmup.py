@@ -20,7 +20,9 @@ def warmup_once(method, layer):
         return
     if cache.hot_map.numel() != 512 or not 16 <= cache.slot_global_ids.numel() <= 128:
         raise RuntimeError('unchecked LRU warmup geometry')
-    if method._static_hot_cache_max_tokens != 16:
+    # lane-3090 (10-28): any threshold 1..16; set it to hot rows // top-k so the LRU path never
+    # overflows capacity (an overflow falls back to raw UVA weights: C=4 collapsed to 22 tok/s).
+    if not 1 <= method._static_hot_cache_max_tokens <= 16:
         raise RuntimeError('unchecked LRU token threshold')
     top_k = layer.top_k
     if top_k != 10:
