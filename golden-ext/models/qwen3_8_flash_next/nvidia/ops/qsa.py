@@ -997,7 +997,7 @@ def qsa_sparse_paged_attention(
     assert head_dim >= 16 and (head_dim & (head_dim - 1)) == 0
     assert q.dtype == torch.bfloat16
     assert k_cache.dtype == v_cache.dtype
-    is_fp8 = k_cache.dtype == torch.float8_e4m3fn
+    is_fp8 = k_cache.dtype in (torch.float8_e4m3fn, torch.float8_e5m2)
     if is_fp8:
         assert k_scale is not None and v_scale is not None
         # Host pre-multiply: fold the K dequant scale into the attention scale
@@ -1012,7 +1012,8 @@ def qsa_sparse_paged_attention(
     # sm_86 Triton cannot even name fp8e4nv, so the e4m3 cache goes to the kernel
     # as raw uint8 bytes and is decoded inside it (see _e4m3_bytes_to). Ranks at
     # sm_89+ keep the native path with no byte-level change at all.
-    emu_fp8 = is_fp8 and not _has_native_fp8()
+    # lane-3090: only e4m3 needs the software decode below sm_89; e5m2 (fp8e5) is native on sm_86.
+    emu_fp8 = k_cache.dtype == torch.float8_e4m3fn and not _has_native_fp8()
     assert logical_indices.dtype == block_table.dtype == torch.int32
     assert token_to_req.dtype == torch.int32
     assert q.device == k_cache.device == v_cache.device
