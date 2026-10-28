@@ -25,7 +25,7 @@ def initialize(method,layer):
     emap = layer.expert_map
     local_ids = (emap[cache.slot_global_ids.long()] if emap is not None
                  else cache.slot_global_ids).long()
-    if local_count not in (256, 512) or not 16<=capacity<=128 or local_ids.unique().numel()!=capacity:
+    if local_count not in (128, 256, 512) or not 16<=capacity<=128 or local_ids.unique().numel()!=capacity:
         raise RuntimeError('unchecked tiered expert geometry')
     for name in ('w1_zp','w2_zp','w1_bias','w2_bias','g1_alphas','g2_alphas'):
         if getattr(base.quant_config,name) is not None:

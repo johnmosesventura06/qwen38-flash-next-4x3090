@@ -18,6 +18,7 @@ fi
 
 docker_env=(
   -e "PORT=$port"
+  -e "CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0,1}"
   -e "VLLM_QSA_EXACT_TOPK=$qsa_exact"
 )
 for name in \
@@ -28,6 +29,13 @@ for name in \
   MAX_NUM_SEQS \
   KV_CACHE_MEMORY_BYTES \
   CPU_OFFLOAD_GB \
+  TP_SIZE \
+  COMPILE_MODE \
+  SPEC_METHOD \
+  SPEC_K \
+  SPEC_MIN \
+  SPEC_MAX \
+  CUDA_VISIBLE_DEVICES \
   VLLM_PLE_OFFLOAD_READY_TIMEOUT \
   VLLM_WNA16_STATIC_HOT_CACHE_SIZE \
   VLLM_WNA16_STATIC_HOT_CACHE_MAX_TOKENS \
@@ -100,7 +108,7 @@ exec docker run --rm \
   --ulimit memlock=-1 \
   --ulimit stack=67108864 \
   ${limit_args[@]+"${limit_args[@]}"} \
-  -p "127.0.0.1:$port:$port" \
+  -p "${BIND:-127.0.0.1}:$port:$port" \
   "${docker_env[@]}" \
   ${cache_mounts[@]+"${cache_mounts[@]}"} \
   -v "$model_dir:/model:ro" \

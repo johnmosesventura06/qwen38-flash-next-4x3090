@@ -105,10 +105,22 @@ else
   offload_args=(--offload-backend uva --cpu-offload-gb "$CPU_OFFLOAD_GB" --cpu-offload-params experts)
 fi
 
+if [[ "${SPEC_METHOD:-mtp}" == "ngram_gpu" ]]; then
+  # owner order 10-03 21:30: ngram_gpu arm — GPU-resident vectorized n-gram
+  # drafter (no draft weights at all), async-whitelisted by the engine.
+  spec_args=(--speculative-config "{\"method\":\"ngram_gpu\",\"num_speculative_tokens\":${SPEC_K:-4},\"prompt_lookup_min\":${SPEC_MIN:-3},\"prompt_lookup_max\":${SPEC_MAX:-5}}")
+elif [[ "$MTP_DEPTH" =~ ^[0-9]+$ ]] && (( MTP_DEPTH == 0 )); then
+  # owner order 10-03 20:13: MTP off = omit speculative decoding entirely; stock script
+  # would pass num_speculative_tokens:0 which the engine rejects.
+  spec_args=()
+else
+  spec_args=(--speculative-config "{\"method\":\"mtp\",\"num_speculative_tokens\":$MTP_DEPTH,\"use_local_argmax_reduction\":true,\"model\":\"$mtp_model\"}")
+fi
+
 exec vllm serve "$model" \
   --served-model-name "$SERVED_MODEL_NAME" \
   --host 0.0.0.0 --port "$PORT" \
-  --tensor-parallel-size 2 \
+  --tensor-parallel-size "${TP_SIZE:-2}" \
   --enable-expert-parallel \
   --all2all-backend allgather_reducescatter \
   --moe-backend humming \
@@ -128,10 +140,9 @@ exec vllm serve "$model" \
   --mamba-cache-mode align \
   "$async_scheduling_arg" \
   ${custom_all_reduce_arg:+"$custom_all_reduce_arg"} \
-  --compilation-config '{"mode":0,"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+  --compilation-config "{\"mode\":${COMPILE_MODE:-0},\"cudagraph_mode\":\"FULL_DECODE_ONLY\"}" \
   --trust-remote-code \
   --enable-auto-tool-choice \
   --tool-call-parser qwen3_coder \
   --reasoning-parser qwen3 \
-  --speculative-config \
-  "{\"method\":\"mtp\",\"num_speculative_tokens\":$MTP_DEPTH,\"use_local_argmax_reduction\":true,\"model\":\"$mtp_model\"}"
+  ${spec_args[@]+"${spec_args[@]}"}
