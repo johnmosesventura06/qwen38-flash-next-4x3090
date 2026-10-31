@@ -1,3 +1,69 @@
+# Qwen3.8-Flash-Next on 4× RTX 3090: 5 parallel lanes
+
+<h3 align="center">~159 tok/s single stream · ~375 tok/s across 5 streams · ~3,700 tok/s prefill · 256K context</h3>
+
+A 4× RTX 3090 (TP4) build of [DominikBucko/qwen38-flash-next-2x3090](https://github.com/DominikBucko/qwen38-flash-next-2x3090),
+tuned to serve **5 agents at once** with **everything on the GPUs** (no expert offload), MTP-3 speculative
+decoding, 8-bit KV cache, vision, and a KV cache that survives restarts (persisted to NVMe).
+Same [checkpoint](https://huggingface.co/albucino/Qwen3.8-Flash-Next-W4A16-FP8PLE) as upstream.
+
+## Speeds (measured 2026-10-30, warm, 350 W per card)
+
+| Test | Result |
+|---|---:|
+| Decode, 1 stream | **158.9 tok/s** |
+| Decode, 4 streams (total) | 331.6 tok/s (~83 per stream) |
+| Decode, 5 streams (total) | **375.3 tok/s** (~75 per stream) |
+| Prefill, 20,349-token prompt | 5.4 s to first token (~3,750 tok/s) |
+| Prefill, 39,949-token prompt | 10.7 s to first token (~3,720 tok/s) |
+| 5 requests at once, each 20K in + 1,000 out | all done in 38 s |
+| MTP-3 acceptance | ~2.4–2.6 tokens per step |
+
+At a 280 W cap: 149–156 single, 347–353 at 4 streams, 367–379 at 5 streams. Prefill does not change with the cap.
+
+## Hardware
+
+| | |
+|---|---|
+| GPUs | 4× RTX 3090 24 GB (1× MSI, 3× Zotac Trinity), each on **PCIe 4.0 x4** (one x16 slot, x4x4x4x4 bifurcation, risers) |
+| CPU / RAM | Ryzen 9 9950X, 128 GB DDR5 |
+| Driver | NVIDIA 615.78.08 open kernel modules + [aikitoria P2P patch](https://github.com/aikitoria/open-gpu-kernel-modules); BAR1 resized to 32 GiB on the Zotacs (their vBIOS has no ReBAR) |
+| OS | Ubuntu, kernel 7.0 |
+| Power | 350 W cap per card. One PSU socket per 8-pin, no daisy chains |
+
+Only x4 links per card, so a board with full x16 slots (EPYC/Threadripper) should do at least as well.
+
+## What changed vs upstream
+
+- **TP4** instead of TP2: `TP_SIZE=4`, all 4 cards (`CUDA_VISIBLE_DEVICES=0,1,2,3`).
+- **Full fit:** all experts on the GPUs (`CPU_OFFLOAD_GB=0`). Peak 24,102 MiB per card, vision included.
+- **5 lanes** (`MAX_NUM_SEQS=5`) sharing one **256K-token fp8 e5m2 KV pool** (e5m2 converts natively on sm_86; e4m3 made prefill 2.5× slower).
+- **CUDA graphs for every MTP-3 batch size** `[4,8,12,16,20]` (the default list skipped 20, so 5 streams ran eager: 222 → 319+ tok/s).
+- **NCCL instead of the custom PCIe all-reduce** on 3090s (C=4: 281 → 355 tok/s).
+- **2,048-token prefill chunks**, PLE table (FP8) prefaulted in RAM, vision ON (5 images per request).
+- **Durable KV:** prefix KV persisted to NVMe (`golden-ext/` grafts: disk tier connector + journal), so a restart keeps its cache.
+- `golden-ext/` holds the 7 mounted patches; `golden-ext-parked/` documents the ones not needed for this config.
+
+All settings live in [`.env`](.env), each with the measurement behind it.
+
+## Run it
+
+```bash
+git clone https://github.com/johnmosesventura06/qwen38-flash-next-4x3090 && cd qwen38-flash-next-4x3090
+docker build -f docker/Dockerfile -t qwen38-flash-next-tp4-clean:locked .   # or follow upstream's build steps
+# download the checkpoint, then set MODEL_DIR (and KV_TIER_DIR / PLE_DISK8_DIR paths) in .env
+./lane-3090-boot.sh          # serves an OpenAI-compatible API on :8000, log in ~/lane-3090-serve.log
+```
+
+Needs ~128 GB system RAM (PLE table in RAM) and ~100 GB free NVMe for the durable KV tier (`disk_capacity_bytes` in `.env`).
+
+## Credits
+
+Dominik Bucko's [qwen38-flash-next-2x3090](https://github.com/DominikBucko/qwen38-flash-next-2x3090) did the heavy
+lifting (runtime, patches, checkpoint). This repo adds the 4-GPU configuration and the patches above. Apache-2.0, like upstream.
+Upstream's original README follows below.
+
+---
 # Qwen3.8-Flash-Next on 2× RTX 3090
 
 <h2 align="center">Up to 4,191 tok/s prefill · up to 111.5 tok/s decode</h2>

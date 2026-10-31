@@ -27,7 +27,7 @@ expandable_segments:True, retention/hot-cache-max-tokens = profile defaults.
 `~/notes/bench-pre-buckotp4-20261003/golden-lane-warm.jsonl` —
 pp_mean 2425.6 / tg_recip 57.87 / TTFT 1.27 s (n5 warmup1, 3078-in/500-out @ 455K tier)
 
-## 4. bind override (reachability from laptop-2, not a GPU-count field)
+## 4. bind override (reachability from another machine on the LAN, not a GPU-count field)
 docker_serve.sh: -p "127.0.0.1:$port" -> -p "${BIND:-127.0.0.1}:$port"; .env sets BIND=0.0.0.0.
 Default stays Bucko localhost-only.
 
