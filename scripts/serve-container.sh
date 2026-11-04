@@ -132,8 +132,11 @@ if [[ -n "${REASONING_EFFORT_TEMPLATE:-}" ]]; then
   template_args=(--chat-template "$REASONING_EFFORT_TEMPLATE")
 fi
 
+# SERVED_MODEL_NAME may hold several names (first = reported, rest = aliases), e.g. profiles/uncensored.env.
+read -r -a served_names <<< "$SERVED_MODEL_NAME"
+
 exec vllm serve "$model" \
-  --served-model-name "$SERVED_MODEL_NAME" \
+  --served-model-name "${served_names[@]}" \
   --host 0.0.0.0 --port "$PORT" \
   --tensor-parallel-size "${TP_SIZE:-2}" \
   --enable-expert-parallel \
