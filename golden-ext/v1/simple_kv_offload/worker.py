@@ -35,6 +35,7 @@ class SimpleCPUOffloadWorker:
         disk_path: str | None = None,
         disk_capacity_bytes: int = 0,
         disk_buffer_slots: int = 2,
+        disk_num_slots: int = 0,
         use_page_cache: bool = False,
         persist: bool = False,
     ):
@@ -44,6 +45,7 @@ class SimpleCPUOffloadWorker:
         self.disk_path = disk_path
         self.disk_capacity_bytes = disk_capacity_bytes
         self.disk_buffer_slots = disk_buffer_slots
+        self.disk_num_slots = disk_num_slots
         self.use_page_cache = use_page_cache
         self.persist = persist
         self.disk_mode = kv_offload_backend == "disk"
@@ -176,7 +178,17 @@ class SimpleCPUOffloadWorker:
         total_bytes_per_block: int,
         device: torch.device,
     ) -> None:
-        num_disk_slots = max(1, self.disk_capacity_bytes // total_bytes_per_block)
+        fit_slots = max(1, self.disk_capacity_bytes // total_bytes_per_block)
+        # disk_num_slots (ai-host 11-05): the scheduler hands out exactly this many
+        # slot ids, so every rank file must hold all of them.
+        num_disk_slots = self.disk_num_slots if self.disk_num_slots > 0 else fit_slots
+        if num_disk_slots > fit_slots:
+            logger.warning(
+                "disk_num_slots %d x %d B exceeds disk_capacity_bytes on this rank "
+                "(fits %d); the file will be %.2f GiB",
+                num_disk_slots, total_bytes_per_block, fit_slots,
+                num_disk_slots * total_bytes_per_block / 2**30,
+            )
         self.num_cpu_blocks = num_disk_slots
 
         logger.info(

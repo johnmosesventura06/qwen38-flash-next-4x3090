@@ -69,7 +69,8 @@ scripts/make-yarn-draft.sh "$MODEL_DIR" ~/models/mtp-int4-g32-yarn2   # then set
 
 Needs ~128 GB system RAM (PLE table in RAM) and free NVMe for the durable KV tier: `disk_capacity_bytes` in
 `KV_TIER_JSON` is **per GPU**, so the default 25 GiB means 100 GiB on disk. The tier is reserved at boot and
-changing its size needs an empty tier directory.
+changing its size needs an empty tier directory. Under PP every stage must use the same slot count:
+set `disk_num_slots` to `disk_capacity_bytes` // the largest stage block size (2080 for the default 25 GiB).
 
 ## Credits
 

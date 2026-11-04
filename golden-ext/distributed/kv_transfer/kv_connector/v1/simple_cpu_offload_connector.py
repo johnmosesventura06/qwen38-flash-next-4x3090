@@ -47,6 +47,7 @@ _DISK_ONLY_KEYS = (
     "disk_path",
     "disk_capacity_bytes",
     "disk_buffer_slots",
+    "disk_num_slots",
     "use_page_cache",
     "persist",
     "journal_path",
@@ -106,6 +107,22 @@ class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
             extra_config.get("disk_capacity_bytes", 100 * (1024**3))
         )
         disk_buffer_slots = max(1, int(extra_config.get("disk_buffer_slots", 2)))
+        # ai-host 11-05: one disk slot count for the scheduler AND every rank. The
+        # scheduler derives its count from its own (PP stage 0) block bytes; a PP
+        # stage with bigger blocks (stage 1 also holds the MTP draft KV) reserved
+        # fewer slots, the scheduler still handed out the higher slot ids, pwritev
+        # grew that rank file past EOF and the next boot refused the tier.
+        disk_num_slots = int(extra_config.get("disk_num_slots", 0) or 0)
+        if (
+            kv_offload_backend == "disk"
+            and vllm_config.parallel_config.pipeline_parallel_size > 1
+            and disk_num_slots <= 0
+        ):
+            raise ValueError(
+                "disk KV tier under pipeline parallel needs an explicit "
+                "kv_connector_extra_config.disk_num_slots (the same count for every "
+                "stage: disk_capacity_bytes // the largest stage bytes-per-block)"
+            )
         use_page_cache = bool(extra_config.get("use_page_cache", False))
 
         if disk_mode:
@@ -178,6 +195,7 @@ class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
                 hash_block_size=hash_block_size,
                 lazy_offload=lazy_offload,
                 disk_capacity_bytes=disk_capacity_bytes if disk_mode else 0,
+                disk_num_slots=disk_num_slots if disk_mode else 0,
                 persist=persist,
                 tier_stem=disk_path if disk_mode else None,
                 journal_path=journal_path,
@@ -191,6 +209,7 @@ class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
                 disk_path=disk_path,
                 disk_capacity_bytes=disk_capacity_bytes,
                 disk_buffer_slots=disk_buffer_slots,
+                disk_num_slots=disk_num_slots,
                 use_page_cache=use_page_cache,
                 persist=persist,
             )

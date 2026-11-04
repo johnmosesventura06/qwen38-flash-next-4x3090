@@ -80,6 +80,7 @@ class SimpleCPUOffloadScheduler:
         hash_block_size: int,
         lazy_offload: bool = False,
         disk_capacity_bytes: int = 0,
+        disk_num_slots: int = 0,
         persist: bool = False,
         tier_stem: str | None = None,
         journal_path: str | None = None,
@@ -102,7 +103,7 @@ class SimpleCPUOffloadScheduler:
         # Derive a CPU KVCacheConfig from the GPU config and build a coordinator
         assert kv_cache_config is not None
         self.cpu_kv_cache_config = self._derive_cpu_config(
-            kv_cache_config, offload_capacity
+            kv_cache_config, offload_capacity, num_blocks_override=disk_num_slots
         )
         self.num_cpu_blocks = self.cpu_kv_cache_config.num_blocks
         # Find the full attention kv group for prefix cache matching.
@@ -377,7 +378,8 @@ class SimpleCPUOffloadScheduler:
 
     @staticmethod
     def _derive_cpu_config(
-        gpu_config: "KVCacheConfig", cpu_capacity_bytes: int
+        gpu_config: "KVCacheConfig", cpu_capacity_bytes: int,
+        num_blocks_override: int = 0,
     ) -> "KVCacheConfig":
         """Derive a CPU KVCacheConfig from the GPU config.
         Same kv_cache_groups, num_blocks scaled by CPU/GPU memory ratio."""
@@ -396,6 +398,8 @@ class SimpleCPUOffloadScheduler:
         )
         num_gpu_blocks = gpu_config.num_blocks
         num_cpu_blocks = max(1, num_gpu_blocks * cpu_capacity_bytes // gpu_total_bytes)
+        if num_blocks_override > 0:
+            num_cpu_blocks = num_blocks_override  # disk_num_slots (ai-host 11-05)
         # Create CPU kv_cache_tensors mirroring GPU by scaling size proportionally.
         cpu_tensors = [
             KVCacheTensor(
