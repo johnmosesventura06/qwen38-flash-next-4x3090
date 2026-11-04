@@ -190,6 +190,19 @@ class DiskBackend:
             if existing == 0:
                 os.ftruncate(self._fd, expected_size)
                 logger.info("DiskBackend[persist]: creating cold tier %s", disk_path)
+            # ai-host 11-01: the tier file is sparse, so a too-large capacity used to
+            # fill the disk mid-serve (ENOSPC killed the lane). Reserve every block
+            # now (keeps existing data): a capacity that does not fit fails the boot
+            # with a clear message instead of crashing later.
+            try:
+                os.posix_fallocate(self._fd, 0, expected_size)
+            except OSError as e:
+                os.close(self._fd)
+                raise RuntimeError(
+                    f"DiskBackend[persist]: cannot reserve {expected_size / 2**30:.1f} GiB "
+                    f"for {disk_path} ({e}). Free disk space or lower "
+                    "disk_capacity_bytes (then wipe the tier dir)."
+                ) from e
             if crc_path is None:
                 raise RuntimeError("persist mode requires crc_path")
             self._crc_fd = os.open(
