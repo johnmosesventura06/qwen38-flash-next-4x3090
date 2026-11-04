@@ -1993,6 +1993,50 @@ def _trim_old_images(messages, model_config):
     return out
 
 
+# The model sometimes "thinks" a memorized filler line instead of real
+# reasoning before a routine tool call ("Let me calculate that: 27 times 43
+# equals 1161."). The chat template keeps all earlier reasoning, so the filler
+# snowballs: with 4 copies in history the model repeats it 4/6 times and skips
+# real thinking (0/6 with the copies blanked). Remove it from history.
+_FILLER_REASONING_RE = None
+
+
+def _strip_filler_reasoning(messages):
+    import os
+    import re
+
+    global _FILLER_REASONING_RE
+    if os.environ.get("VLLM_STRIP_FILLER_REASONING", "1") != "1":
+        return messages
+    if _FILLER_REASONING_RE is None:
+        _FILLER_REASONING_RE = re.compile(
+            r"[^.\n]*\b27\s*(?:times|x|\u00d7|\*)\s*43\s*(?:equals|=|is)\s*1,?161\b\.?",
+            re.IGNORECASE,
+        )
+    out = None
+    stripped = 0
+    for i, msg in enumerate(messages):
+        if not isinstance(msg, dict) or msg.get("role") != "assistant":
+            continue
+        for key in ("reasoning_content", "reasoning"):
+            text = msg.get(key)
+            if not isinstance(text, str) or "43" not in text:
+                continue
+            new = _FILLER_REASONING_RE.sub("", text).strip()
+            if new == text.strip():
+                continue
+            if out is None:
+                out = list(messages)
+            msg = dict(out[i])
+            msg[key] = new
+            out[i] = msg
+            stripped += 1
+    if out is None:
+        return messages
+    logger.info("Stripped filler reasoning from %d earlier assistant step(s)", stripped)
+    return out
+
+
 def parse_chat_messages(
     messages: list[ChatCompletionMessageParam],
     model_config: ModelConfig,
@@ -2005,6 +2049,7 @@ def parse_chat_messages(
     MultiModalUUIDDict | None,
 ]:
     messages = _trim_old_images(messages, model_config)
+    messages = _strip_filler_reasoning(messages)
     conversation: list[ConversationMessage] = []
     mm_tracker = MultiModalItemTracker(
         model_config,
@@ -2045,6 +2090,7 @@ async def parse_chat_messages_async(
     MultiModalUUIDDict | None,
 ]:
     messages = _trim_old_images(messages, model_config)
+    messages = _strip_filler_reasoning(messages)
     conversation: list[ConversationMessage] = []
     mm_tracker = AsyncMultiModalItemTracker(
         model_config,
