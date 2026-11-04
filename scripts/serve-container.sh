@@ -19,7 +19,7 @@ case "$ENABLE_VISION" in
     fi
     modality_args=(
       --limit-mm-per-prompt "{\"image\":$VISION_MAX_IMAGES,\"video\":0}"
-      --mm-processor-kwargs "{\"min_pixels\":65536,\"max_pixels\":$VISION_MAX_PIXELS}"
+      --mm-processor-kwargs "{\"min_pixels\":${VISION_MIN_PIXELS:-65536},\"max_pixels\":$VISION_MAX_PIXELS}"
       --mm-encoder-tp-mode weights
     )
     ;;
