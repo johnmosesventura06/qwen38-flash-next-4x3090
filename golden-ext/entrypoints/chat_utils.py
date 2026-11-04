@@ -1951,15 +1951,144 @@ def _postprocess_messages(messages: list[ConversationMessage]) -> None:
                     function["arguments"] = {}
 
 
-# lane-3090 graft: agents (browser automation) re-send every earlier screenshot
-# on each step, so a long session trips --limit-mm-per-prompt with a 400. Keep
-# only the newest N images (N = the image limit) and replace older ones with a
-# short text note. VLLM_MM_TRIM_OLD_IMAGES=0 restores stock behaviour.
+# lane-3090 graft: agents (browser/phone automation) re-send every earlier
+# screenshot on each step, so a long session trips --limit-mm-per-prompt with a
+# 400. Keep only the newest images and replace older ones with a short text note.
+#
+# Prefix-cache friendly (2026-11-02): dropping one image per step changed the
+# prompt ~5 screenshots back on every step, so each screenshot step re-prefilled
+# ~20K tokens (6-7 s). Now
+#   * images are dropped in chunks (VLLM_MM_TRIM_CHUNK, default = the image
+#     limit): the cut only moves every CHUNK images, so the model sees between
+#     1 and N recent images and the other steps are pure prompt appends;
+#   * the dsh harness's own offload placeholders ("[image omitted to fit request
+#     image limits; ...]", recomputed per request, unique text per image) are
+#     mapped back to the shape a lane-dropped image has, and count as image
+#     slots, so dsh offloading one more old screenshot changes nothing.
+# VLLM_MM_TRIM_OLD_IMAGES=0 restores stock behaviour; VLLM_MM_TRIM_CHUNK=1 the
+# old one-at-a-time trim.
 _TRIM_IMAGE_PART_TYPES = ("image_url", "input_image", "image_pil", "image", "image_embeds")
 _TRIM_IMAGE_NOTE = "[older screenshot removed to stay within the image limit]"
+_TRIM_OFFLOADED = "_lane_offloaded_image"
+_TOOL_IMAGES_HEADER = "Attached image(s) from tool result:"
+_DSH_OFFLOAD_RE = None
+
+
+def _dsh_offload_re():
+    global _DSH_OFFLOAD_RE
+    if _DSH_OFFLOAD_RE is None:
+        import re
+
+        _DSH_OFFLOAD_RE = re.compile(
+            r"\n?\[image omitted to fit request image limits; .*?"
+            r"(?:before editing\.|attach it again if needed\.)\]",
+            re.DOTALL,
+        )
+    return _DSH_OFFLOAD_RE
+
+
+def _is_tool_images_msg(msg):
+    if not isinstance(msg, dict) or msg.get("role") != "user":
+        return False
+    content = msg.get("content")
+    return (
+        isinstance(content, list)
+        and content
+        and isinstance(content[0], dict)
+        and content[0].get("type") == "text"
+        and content[0].get("text") == _TOOL_IMAGES_HEADER
+    )
+
+
+def _unfold_dsh_offloads(messages):
+    """Rewrite dsh offload placeholders into offloaded-image slots.
+
+    pi-ai sends a tool result's images as a separate user message
+    ("Attached image(s) from tool result:" + images) after the run of tool
+    messages; once dsh offloads such an image, its placeholder is joined into
+    the tool message text instead and the user message shrinks or disappears.
+    Both forms are mapped to: tool text without the placeholder ("(see attached
+    image)" when nothing else is left) + the user message holding one slot per
+    image. In user messages the placeholder part itself becomes the slot.
+    """
+    rx = _dsh_offload_re()
+    if not any(
+        isinstance(m, dict)
+        and (
+            (isinstance(m.get("content"), str) and "image omitted to fit" in m["content"])
+            or (
+                isinstance(m.get("content"), list)
+                and any(
+                    isinstance(p, dict)
+                    and p.get("type") == "text"
+                    and "image omitted to fit" in (p.get("text") or "")
+                    for p in m["content"]
+                )
+            )
+        )
+        for m in messages
+    ):
+        return messages
+    out = []
+    i = 0
+    n = len(messages)
+    while i < n:
+        msg = messages[i]
+        role = msg.get("role") if isinstance(msg, dict) else None
+        if role == "tool":
+            # one pi-ai tool-result run: consecutive tool messages
+            pending = 0
+            while i < n and isinstance(messages[i], dict) and messages[i].get("role") == "tool":
+                tmsg = messages[i]
+                content = tmsg.get("content")
+                if isinstance(content, str) and "image omitted to fit" in content:
+                    k = len(rx.findall(content))
+                    text = rx.sub("", content)
+                    if content.startswith("[image omitted to fit") and text.startswith("\n"):
+                        text = text[1:]
+                    if k:
+                        tmsg = dict(tmsg)
+                        tmsg["content"] = text if text else "(see attached image)"
+                        pending += k
+                out.append(tmsg)
+                i += 1
+            if pending:
+                slots = [{"type": _TRIM_OFFLOADED} for _ in range(pending)]
+                if i < n and _is_tool_images_msg(messages[i]):
+                    umsg = dict(messages[i])
+                    umsg["content"] = [umsg["content"][0], *slots, *umsg["content"][1:]]
+                    out.append(umsg)
+                    i += 1
+                else:
+                    out.append(
+                        {"role": "user", "content": [{"type": "text", "text": _TOOL_IMAGES_HEADER}, *slots]}
+                    )
+            continue
+        if role == "user" and isinstance(msg.get("content"), list):
+            parts = msg["content"]
+            new_parts = None
+            for j, part in enumerate(parts):
+                if (
+                    isinstance(part, dict)
+                    and part.get("type") == "text"
+                    and "image omitted to fit" in (part.get("text") or "")
+                    and rx.fullmatch(part["text"].strip()) is not None
+                ):
+                    if new_parts is None:
+                        new_parts = list(parts[:j])
+                    new_parts.append({"type": _TRIM_OFFLOADED})
+                elif new_parts is not None:
+                    new_parts.append(part)
+            if new_parts is not None:
+                msg = dict(msg)
+                msg["content"] = new_parts
+        out.append(msg)
+        i += 1
+    return out
 
 
 def _trim_old_images(messages, model_config):
+    import math
     import os
 
     if os.environ.get("VLLM_MM_TRIM_OLD_IMAGES", "1") != "1":
@@ -1968,16 +2097,33 @@ def _trim_old_images(messages, model_config):
     if mm_config is None:
         return messages
     limit = mm_config.get_limit_per_prompt("image")
+    messages = _unfold_dsh_offloads(messages)
     positions = []
+    offloaded = 0
     for i, msg in enumerate(messages):
         content = msg.get("content") if isinstance(msg, dict) else None
         if isinstance(content, list):
             for j, part in enumerate(content):
-                if isinstance(part, dict) and part.get("type") in _TRIM_IMAGE_PART_TYPES:
+                if not isinstance(part, dict):
+                    continue
+                ptype = part.get("type")
+                if ptype in _TRIM_IMAGE_PART_TYPES:
                     positions.append((i, j))
-    if len(positions) <= limit:
+                elif ptype == _TRIM_OFFLOADED:
+                    positions.append((i, j))
+                    offloaded += 1
+    total = len(positions)
+    if total <= limit and not offloaded:
         return messages
-    drop = positions[: len(positions) - limit]
+    chunk = max(1, int(os.environ.get("VLLM_MM_TRIM_CHUNK", str(limit)) or limit))
+    keep = total
+    if total > limit:
+        keep = total - math.ceil((total - limit) / chunk) * chunk
+    drop = set(positions[: total - keep])
+    # an offloaded slot never carries an image, wherever the cut falls
+    for i, j in positions[total - keep :]:
+        if messages[i]["content"][j].get("type") == _TRIM_OFFLOADED:
+            drop.add((i, j))
     by_msg = {}
     for i, j in drop:
         by_msg.setdefault(i, set()).add(j)
@@ -1989,8 +2135,58 @@ def _trim_old_images(messages, model_config):
             for j, part in enumerate(msg["content"])
         ]
         out[i] = msg
-    logger.info("Trimmed %d older image(s); kept the newest %d", len(drop), limit)
+    logger.info(
+        "Trimmed %d older image(s) (%d dsh-offloaded); kept the newest %d of %d",
+        len(drop), offloaded, total - len(drop), total,
+    )
     return out
+
+
+# Debug (VLLM_LOG_PREFIX_BREAKS=1): log where each request's messages first
+# differ from the previous request's, to spot client/graft changes that break
+# the prefix cache. Compares per-message hashes after the rewrites above.
+_PREFIX_PREV = None
+
+
+def _log_prefix_break(messages):
+    import hashlib
+    import json
+    import os
+
+    global _PREFIX_PREV
+    if os.environ.get("VLLM_LOG_PREFIX_BREAKS", "0") != "1":
+        return
+    hashes = []
+    for msg in messages:
+        try:
+            blob = json.dumps(msg, sort_keys=True, default=str).encode()
+        except Exception:  # noqa: BLE001
+            blob = repr(msg).encode()
+        hashes.append(hashlib.blake2b(blob, digest_size=8).digest())
+    prev, _PREFIX_PREV = _PREFIX_PREV, (hashes, messages)
+    if prev is None:
+        return
+    prev_hashes, prev_msgs = prev
+    k = 0
+    while k < min(len(hashes), len(prev_hashes)) and hashes[k] == prev_hashes[k]:
+        k += 1
+    if k >= len(prev_hashes):
+        logger.info("prefix-check: appended (%d -> %d messages)", len(prev_hashes), len(hashes))
+        return
+
+    def brief(m):
+        if not isinstance(m, dict):
+            return repr(m)[:160]
+        c = m.get("content")
+        if isinstance(c, list):
+            c = [p.get("type") if p.get("type") != "text" else "text:" + (p.get("text") or "")[:60] for p in c if isinstance(p, dict)]
+        return f"{m.get('role')}: {str(c)[:200]}"
+
+    logger.info(
+        "prefix-check: diverges at message %d of %d (prev %d)\n  prev: %s\n  now:  %s",
+        k, len(hashes), len(prev_hashes),
+        brief(prev_msgs[k]), brief(messages[k]) if k < len(messages) else "-",
+    )
 
 
 # The model sometimes "thinks" a memorized filler line instead of real
@@ -2050,6 +2246,7 @@ def parse_chat_messages(
 ]:
     messages = _trim_old_images(messages, model_config)
     messages = _strip_filler_reasoning(messages)
+    _log_prefix_break(messages)
     conversation: list[ConversationMessage] = []
     mm_tracker = MultiModalItemTracker(
         model_config,
@@ -2091,6 +2288,7 @@ async def parse_chat_messages_async(
 ]:
     messages = _trim_old_images(messages, model_config)
     messages = _strip_filler_reasoning(messages)
+    _log_prefix_break(messages)
     conversation: list[ConversationMessage] = []
     mm_tracker = AsyncMultiModalItemTracker(
         model_config,

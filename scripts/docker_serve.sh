@@ -69,6 +69,9 @@ for name in \
   PYTHONHASHSEED \
   REASONING_EFFORT \
   REASONING_EFFORT_LOCK \
+  VLLM_SHM_BUSY_LOOP_S \
+  VLLM_MM_TRIM_CHUNK \
+  VLLM_LOG_PREFIX_BREAKS \
   EXTRA_VLLM_ARGS
 do
   if declare -p "$name" &>/dev/null; then
