@@ -1,25 +1,32 @@
-# Qwen3.8-Flash-Next on 4× RTX 3090: 5 parallel lanes
+# Qwen3.8-Flash-Next on 4× RTX 3090: 5 parallel lanes, 512K context
 
-<h3 align="center">~159 tok/s single stream · ~375 tok/s across 5 streams · ~3,700 tok/s prefill · 256K context</h3>
+<h3 align="center">~136 tok/s single stream · up to ~444 tok/s across 5 streams · ~6,900 tok/s prefill · 512K context</h3>
 
-A 4× RTX 3090 (TP4) build of [DominikBucko/qwen38-flash-next-2x3090](https://github.com/DominikBucko/qwen38-flash-next-2x3090),
+A 4× RTX 3090 build of [DominikBucko/qwen38-flash-next-2x3090](https://github.com/DominikBucko/qwen38-flash-next-2x3090),
 tuned to serve **5 agents at once** with **everything on the GPUs** (no expert offload), MTP-3 speculative
 decoding, 8-bit KV cache, vision, and a KV cache that survives restarts (persisted to NVMe).
 Same [checkpoint](https://huggingface.co/albucino/Qwen3.8-Flash-Next-W4A16-FP8PLE) as upstream.
 
-## Speeds (measured 2026-10-30, warm, 350 W per card)
+Since 2026-11-04 the cards run as **pipeline parallel 2 × tensor parallel 2** (PP2×TP2) instead of TP4:
+prefill is about 2× faster, the KV pool is 2.4× bigger, and that room is used for **512K tokens per request** (YaRN ×2).
 
-| Test | Result |
-|---|---:|
-| Decode, 1 stream | **158.9 tok/s** |
-| Decode, 4 streams (total) | 331.6 tok/s (~83 per stream) |
-| Decode, 5 streams (total) | **375.3 tok/s** (~75 per stream) |
-| Prefill, 20,349-token prompt | 5.4 s to first token (~3,750 tok/s) |
-| Prefill, 39,949-token prompt | 10.7 s to first token (~3,720 tok/s) |
-| 5 requests at once, each 20K in + 1,000 out | all done in 38 s |
-| MTP-3 acceptance | ~2.4–2.6 tokens per step |
+## Speeds (measured 2026-11-04/05, warm, all cards on PCIe 4.0 x4)
 
-At a 280 W cap: 149–156 single, 347–353 at 4 streams, 367–379 at 5 streams. Prefill does not change with the cap.
+| Test | PP2×TP2, 512K (default) | PP2×TP2, 256K | TP4, 256K (before) |
+|---|---:|---:|---:|
+| Decode, 1 stream | 136 tok/s | 141–156 tok/s | 160 tok/s |
+| Decode, 5 streams (total) | **444 tok/s** best (331–445 measured) | 345–434 tok/s | 362 tok/s |
+| 20K-token prompt, time to first token | **2.9 s** | 2.9 s | 5.3 s |
+| 40K-token prompt, time to first token | – | **5.4 s** | 10.7 s |
+| 5 requests at once, each 20K in + 1,000 out | **25 s** | 26 s | 39 s |
+| KV pool (fp8 e5m2) | 640K tokens | 563K tokens | 262K tokens |
+| Longest prompt tested | 504K tokens: 75 s to first token, needle found | – | 256K |
+| MTP-3 acceptance | ~2.3 tokens per step | ~2.4 | ~2.4–2.6 |
+
+Short benches (about 2.5 minutes each). 5-stream decode on PP swings between runs: on 2026-11-05 the same 512K lane
+scored 444.5, 413.0 and 399.5 tok/s in three back-to-back runs (11-04: 331). TP4 is a single run. YaRN cost 5–8% of single-stream
+decode in the 11-04 runs and nothing on prefill. For more decode speed at 256K, drop `MAX_MODEL_LEN`, `VLLM_ALLOW_LONG_MAX_MODEL_LEN`,
+`HF_OVERRIDES_JSON` and point `MTP_MODEL_DIR` back at the stock draft.
 
 ## Hardware
 
@@ -29,20 +36,24 @@ At a 280 W cap: 149–156 single, 347–353 at 4 streams, 367–379 at 5 streams
 | CPU / RAM | Ryzen 9 9950X, 128 GB DDR5 |
 | Driver | NVIDIA 615.78.08 open kernel modules + [aikitoria P2P patch](https://github.com/aikitoria/open-gpu-kernel-modules); BAR1 resized to 32 GiB on the Zotacs (their vBIOS has no ReBAR) |
 | OS | Ubuntu, kernel 7.0 |
-| Power | 350 W cap per card. One PSU socket per 8-pin, no daisy chains |
+| Power | 350 W cap per card, two PSUs. One PSU socket per 8-pin, no daisy chains |
 
 Only x4 links per card, so a board with full x16 slots (EPYC/Threadripper) should do at least as well.
+A card that drops to x2 costs TP4 about 60% of its prefill; check `nvidia-smi --query-gpu=pcie.link.width.current` under load.
 
 ## What changed vs upstream
 
-- **TP4** instead of TP2: `TP_SIZE=4`, all 4 cards (`CUDA_VISIBLE_DEVICES=0,1,2,3`).
-- **Full fit:** all experts on the GPUs (`CPU_OFFLOAD_GB=0`). Peak 24,102 MiB per card, vision included.
-- **5 lanes** (`MAX_NUM_SEQS=5`) sharing one **256K-token fp8 e5m2 KV pool** (e5m2 converts natively on sm_86; e4m3 made prefill 2.5× slower).
-- **CUDA graphs for every MTP-3 batch size** `[4,8,12,16,20]` (the default list skipped 20, so 5 streams ran eager: 222 → 319+ tok/s).
-- **NCCL instead of the custom PCIe all-reduce** on 3090s (C=4: 281 → 355 tok/s).
-- **2,048-token prefill chunks**, PLE table (FP8) prefaulted in RAM, vision ON (5 images per request).
+- **PP2×TP2** on 4 cards: stage 0 = GPU 0,1 (embedding, PLE, vision, layers 0–24), stage 1 = GPU 2,3 (layers 25–47, lm_head, MTP draft).
+  `PP_SIZE=2`, `TP_SIZE=2`, `VLLM_PP_LAYER_PARTITION=25,23`. Pipeline parallel + MTP needed vLLM patches the image lacks: `pp-ext/` (see [pp-ext/README.md](pp-ext/README.md)).
+- **512K per request:** YaRN ×2 through `HF_OVERRIDES_JSON`, plus a draft folder with the same rope settings (`scripts/make-yarn-draft.sh`), because dict overrides never reach the MTP draft.
+- **Full fit:** all experts on the GPUs (`CPU_OFFLOAD_GB=0`). Peak ~24.0 GB per card at 512K, vision included.
+- **5 lanes** (`MAX_NUM_SEQS=5`) sharing one **640K-token fp8 e5m2 KV pool** (e5m2 converts natively on sm_86; e4m3 made prefill 2.5× slower).
+- **CUDA graphs for every MTP-3 batch size** `[4,8,12,16,20]` (the default list skipped 20, so 5 streams ran eager).
+- **NCCL instead of the custom PCIe all-reduce** on 3090s.
+- **2,048-token prefill chunks** (3,072 and 4,096 ran out of memory or gave no gain under PP), PLE table (FP8) prefaulted in RAM.
+- **Vision for agents:** images at native resolution (no downscaling up to 16 MP, no upscaling of small images), the newest 1–5 images kept per request, older ones dropped 5 at a time so the cached prompt prefix survives.
 - **Durable KV:** prefix KV persisted to NVMe (`golden-ext/` grafts: disk tier connector + journal), so a restart keeps its cache.
-- `golden-ext/` holds the 7 mounted patches; `golden-ext-parked/` documents the ones not needed for this config.
+- `golden-ext/` holds the mounted patches; `golden-ext-parked/` documents the ones not needed for this config.
 
 All settings live in [`.env`](.env), each with the measurement behind it.
 
@@ -52,18 +63,23 @@ All settings live in [`.env`](.env), each with the measurement behind it.
 git clone https://github.com/johnmosesventura06/qwen38-flash-next-4x3090 && cd qwen38-flash-next-4x3090
 docker build -f docker/Dockerfile -t qwen38-flash-next-tp4-clean:locked .   # or follow upstream's build steps
 # download the checkpoint, then set MODEL_DIR (and KV_TIER_DIR / PLE_DISK8_DIR paths) in .env
+scripts/make-yarn-draft.sh "$MODEL_DIR" ~/models/mtp-int4-g32-yarn2   # then set MTP_MODEL_DIR to it
 ./lane-3090-boot.sh          # serves an OpenAI-compatible API on :8000, log in ~/lane-3090-serve.log
 ```
 
-Needs ~128 GB system RAM (PLE table in RAM) and ~100 GB free NVMe for the durable KV tier (`disk_capacity_bytes` in `.env`).
+Needs ~128 GB system RAM (PLE table in RAM) and free NVMe for the durable KV tier: `disk_capacity_bytes` in
+`KV_TIER_JSON` is **per GPU**, so the default 25 GiB means 100 GiB on disk. The tier is reserved at boot and
+changing its size needs an empty tier directory.
 
 ## Credits
 
 Dominik Bucko's [qwen38-flash-next-2x3090](https://github.com/DominikBucko/qwen38-flash-next-2x3090) did the heavy
-lifting (runtime, patches, checkpoint). This repo adds the 4-GPU configuration and the patches above. Apache-2.0, like upstream.
+lifting (runtime, patches, checkpoint). This repo adds the 4-GPU configuration and the patches above. The `pp-ext/`
+files are vLLM sources (Apache-2.0) with upstream PRs #50514, #55745 and #46994 ported in. Apache-2.0, like upstream.
 Upstream's original README follows below.
 
 ---
+
 # Qwen3.8-Flash-Next on 2× RTX 3090
 
 <h2 align="center">Up to 4,191 tok/s prefill · up to 111.5 tok/s decode</h2>

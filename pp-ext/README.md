@@ -20,7 +20,19 @@ embed_tokens + lm_head, so under PP the drafter keeps its own embedding (+~0.64 
 PORT.diff = the whole change against the image's files. Workspace: ~/pp-port/base (git, base dcd8cee).
 
 Verified so far (no GPU): every patched module imports in the lane image; get_pp_indices gives
-25/23, 18/30, 8/20/20. NOT yet run on GPUs.
+25/23, 18/30, 8/20/20.
+
+## First GPU boot (2026-11-04, 4x 3090 PP2 x TP2) and production since then
+What the first boot needed on top of the port:
+- `distributed/utils.py`: `get_pp_indices` returns the whole model when `pp_size == 1` (the PLE offload
+  worker builds the model in its own world-size-1 group, where the PP split does not apply).
+- `--block-size 3200`: both stages must share one block size for the CSA + linear-attention layers.
+- `--mamba-ssm-cache-dtype float32`: the checkpoint asks for float32 GDN state, but under PP only the
+  drafter stage applied it, so the two stages disagreed on the cache spec.
+- `VLLM_PREFIX_CACHE_RETENTION_INTERVAL=3200` (must be a multiple of the block size).
+- `KV_CACHE_MEMORY_BYTES=3000000000`: 1.9e9 (356K pool) filled to 100% at 5 x 20K requests.
+Result vs TP4: prefill ~2x (20K prompt 2.9 vs 5.3 s), 5 x 20K burst 26 vs 39 s, pool 563K vs 262K tokens,
+MTP acceptance ~2.4. Then 512K per request via YaRN x2 (pool 640K). Production settings are in the root `.env`.
 
 ## Profiles (`./lane-pp-boot.sh <profile>`; replaces production on :8000)
 - pp2-3090: 4x 3090 as PP2 x TP2 -> software de-risk, A/B vs TP4.
