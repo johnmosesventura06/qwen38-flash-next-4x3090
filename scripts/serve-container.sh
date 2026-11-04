@@ -139,6 +139,7 @@ exec vllm serve "$model" \
   --served-model-name "${served_names[@]}" \
   --host 0.0.0.0 --port "$PORT" \
   --tensor-parallel-size "${TP_SIZE:-2}" \
+  --pipeline-parallel-size "${PP_SIZE:-1}" \
   --enable-expert-parallel \
   --all2all-backend allgather_reducescatter \
   --moe-backend humming \

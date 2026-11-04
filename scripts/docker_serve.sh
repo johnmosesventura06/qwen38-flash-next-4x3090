@@ -30,6 +30,10 @@ for name in \
   KV_CACHE_MEMORY_BYTES \
   CPU_OFFLOAD_GB \
   TP_SIZE \
+  PP_SIZE \
+  VLLM_PP_LAYER_PARTITION \
+  CUDA_DEVICE_ORDER \
+  NCCL_P2P_DISABLE \
   COMPILE_MODE \
   SPEC_METHOD \
   SPEC_K \
@@ -132,6 +136,20 @@ if [[ "${GOLDEN_GRAFTS:-1}" == "1" ]]; then
     ext_args+=( -v "$f:/usr/local/lib/python3.12/dist-packages/vllm/$rel:ro" )
   done < <(find "$EXT" -type f -name '*.py' -print0)
   echo "[docker_serve/lane-3090] graft mounts: $(( ${#ext_args[@]} / 2 ))"
+fi
+
+# lane-3090-pp (10-31): PP + MTP port (upstream #50514 + #55745 + #46994 runner hunk, Flash-Next MTP
+# drafter branches on intermediate_tensors). Mounted AFTER golden-ext; no file overlaps with it.
+PP_EXT="$REPO_DIR/pp-ext"
+if [[ "${PP_GRAFTS:-0}" == "1" ]]; then
+  [[ -d "$PP_EXT" ]] || { echo "missing PP graft tree: $PP_EXT" >&2; exit 2; }
+  n_pp=0
+  while IFS= read -r -d "" f; do
+    rel=${f#"$PP_EXT"/}
+    ext_args+=( -v "$f:/usr/local/lib/python3.12/dist-packages/vllm/$rel:ro" )
+    n_pp=$((n_pp + 1))
+  done < <(find "$PP_EXT" -type f -name "*.py" -print0)
+  echo "[docker_serve/lane-3090-pp] PP graft mounts: $n_pp"
 fi
 
 # Serve wrapper from this repo (hf-overrides, kv-transfer-config, compilation-config,
